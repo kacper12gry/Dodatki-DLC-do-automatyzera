@@ -1,0 +1,7 @@
+{
+  "name": "Sprawdzacz czcionek",
+  "author": "kacper12gry",
+  "version": "1.0",
+  "description": "Sprawdza jakich czcionek wymaga plik napisów",
+  "executable": "sprawdzacz_czcionek.py"
+}

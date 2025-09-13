@@ -1,0 +1,7 @@
+{
+  "name": "earnvids_integracja",
+  "author": "kacper12gry",
+  "version": "1.0",
+  "description": "earnvids_integracja API",
+  "executable": "main.py"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "testDLC",
+  "author": "kacper12gry",
+  "version": "1.0",
+  "description": "To jest przykładowy dodatek, który uruchamia prosty skrypt.",
+  "executable": "start.py"
+}
