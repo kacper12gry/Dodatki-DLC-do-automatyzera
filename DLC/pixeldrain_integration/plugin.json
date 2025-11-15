@@ -1,0 +1,7 @@
+{
+  "name": "pixeldrain_integracja",
+  "author": "kacper12gry",
+  "version": "1.0",
+  "description": "pixeldrain_integracja API",
+  "executable": "pixel.py"
+}
