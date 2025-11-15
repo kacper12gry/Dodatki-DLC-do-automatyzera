@@ -6,16 +6,16 @@ import os
 import re
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QProgressBar, QMenuBar,
-    QVBoxLayout, QComboBox, QListWidget, QFileDialog, QTextEdit, QMessageBox, QStyleFactory, QGroupBox, QHBoxLayout
+    QVBoxLayout, QComboBox, QListWidget, QFileDialog, QTextEdit, QMessageBox, QStyleFactory, QGroupBox, QHBoxLayout,
+    QTreeWidget, QTreeWidgetItem, QTabWidget, QMenu
 )
-from PyQt6.QtCore import QObject, pyqtSignal, QProcess
-from PyQt6.QtGui import QTextCursor
+from PyQt6.QtCore import QProcess, Qt
+from PyQt6.QtGui import QTextCursor, QIcon
+from account_manager_dialog import AccountManagerDialog
+
 
 
 def apply_theme(app):
-    """
-    Parsuje argumenty wiersza poleceń i aplikuje motyw przekazany z aplikacji głównej.
-    """
     parser = argparse.ArgumentParser(description="Uruchomienie dodatku DLC z motywem.")
     parser.add_argument('--style-name', type=str, help='Nazwa stylu Qt do zastosowania.')
     parser.add_argument('--stylesheet-b64', type=str, help='Arkusz stylów QSS zakodowany w Base64.')
@@ -39,13 +39,11 @@ class MegaUploader(QWidget):
         self.setWindowTitle("MEGA Uploader")
         self.setMinimumWidth(600)
 
-        # Ustalenie ścieżki bazowej (dla PyInstallera)
         if getattr(sys, 'frozen', False):
             self.base_path = os.path.dirname(sys.executable)
         else:
             self.base_path = os.path.dirname(os.path.abspath(__file__))
 
-        # Wczytanie wersji z plugin.json
         self.plugin_version = "N/A"
         try:
             plugin_path = os.path.join(self.base_path, 'plugin.json')
@@ -53,39 +51,49 @@ class MegaUploader(QWidget):
                 plugin_info = json.load(f)
                 self.plugin_version = plugin_info.get("version", "N/A")
         except Exception:
-            pass # Ignoruj błąd, jeśli nie można wczytać wersji
+            pass
 
-        # Inicjalizacja stanu i procesu
         self.dane = {}
         self.file_path = ""
         self.is_uploading = False
+        self.is_busy_with_context_action = False
         self.process = None
+        self.ls_output = ""
+        self.link_output = ""
 
-        # --- UI Setup ---
         main_layout = QVBoxLayout(self)
         main_layout.setMenuBar(self._create_menu())
 
-        # Krok 1: Wybór konta i serii
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+
+        uploader_tab = QWidget()
+        browser_tab = QWidget()
+
+        self.tabs.addTab(uploader_tab, "Uploader")
+        self.tabs.addTab(browser_tab, "Podgląd konta")
+
+        self._create_uploader_tab(uploader_tab)
+        self._create_browser_tab(browser_tab)
+
+        self._load_data()
+
+    def _create_uploader_tab(self, tab):
+        main_layout = QVBoxLayout(tab)
         self.account_group = QGroupBox("Krok 1: Wybierz konto i serię")
         account_layout = QVBoxLayout(self.account_group)
-        
         self.sezon_box = QComboBox()
         self.sezon_box.currentTextChanged.connect(self.update_series_list)
-
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Wpisz frazę, aby filtrować listę serii...")
         self.search_input.textChanged.connect(self.search_series)
-
         self.series_list = QListWidget()
-
         account_layout.addWidget(QLabel("Sezon:"))
         account_layout.addWidget(self.sezon_box)
         account_layout.addWidget(QLabel("Wyszukaj serię:"))
         account_layout.addWidget(self.search_input)
         account_layout.addWidget(self.series_list)
         main_layout.addWidget(self.account_group)
-
-        # Krok 2: Wybór pliku
         self.file_group = QGroupBox("Krok 2: Wybierz plik do wysłania")
         file_layout = QHBoxLayout(self.file_group)
         self.choose_file_btn = QPushButton("Wybierz plik...")
@@ -95,8 +103,6 @@ class MegaUploader(QWidget):
         file_layout.addWidget(self.file_path_label, 1)
         file_layout.addWidget(self.choose_file_btn)
         main_layout.addWidget(self.file_group)
-
-        # Krok 3: Wysyłanie
         self.upload_group = QGroupBox("Krok 3: Rozpocznij wysyłanie")
         upload_layout = QVBoxLayout(self.upload_group)
         self.upload_btn = QPushButton("Wyślij do MEGA")
@@ -108,8 +114,6 @@ class MegaUploader(QWidget):
         upload_layout.addWidget(self.status_label)
         upload_layout.addWidget(self.progress_bar)
         main_layout.addWidget(self.upload_group)
-
-        # Logi i wynik
         log_group = QGroupBox("Logi i Wynik")
         log_layout = QVBoxLayout(log_group)
         self.log_output = QTextEdit()
@@ -117,29 +121,218 @@ class MegaUploader(QWidget):
         log_layout.addWidget(self.log_output)
         main_layout.addWidget(log_group)
 
-        # Wczytanie danych i aktualizacja UI
-        self._load_data()
+    def _create_browser_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        control_group = QGroupBox("Wybierz konto i odśwież listę")
+        control_layout = QHBoxLayout(control_group)
+        self.browser_sezon_box = QComboBox()
+        self.browser_seria_box = QComboBox()
+        self.browser_refresh_btn = QPushButton("Odśwież zawartość")
+        self.browser_sezon_box.currentTextChanged.connect(self._update_browser_series_list)
+        self.browser_refresh_btn.clicked.connect(self._refresh_file_list)
+        control_layout.addWidget(QLabel("Sezon:"))
+        control_layout.addWidget(self.browser_sezon_box)
+        control_layout.addWidget(QLabel("Seria:"))
+        control_layout.addWidget(self.browser_seria_box, 1)
+        control_layout.addWidget(self.browser_refresh_btn)
+        layout.addWidget(control_group)
+        self.file_tree = QTreeWidget()
+        self.file_tree.setHeaderLabels(["Nazwa", "Rozmiar", "Data modyfikacji"])
+        self.file_tree.setColumnWidth(0, 350)
+        self.file_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.file_tree.customContextMenuRequested.connect(self._show_file_context_menu)
+        layout.addWidget(self.file_tree)
+        self.browser_status_label = QLabel("Wybierz konto i kliknij 'Odśwież'.")
+        layout.addWidget(self.browser_status_label)
+
+    def _show_file_context_menu(self, position):
+        """Wyświetla menu kontekstowe dla elementu na liście plików."""
+        item = self.file_tree.currentItem()
+        if not item:
+            return
+
+        menu = QMenu()
+        delete_action = menu.addAction("Usuń plik")
+        action = menu.exec(self.file_tree.mapToGlobal(position))
+
+        if action == delete_action:
+            self._delete_selected_file()
+
+    def _delete_selected_file(self):
+        """Rozpoczyna proces usuwania zaznaczonego pliku."""
+        if self.is_uploading or self.is_busy_with_context_action:
+            QMessageBox.warning(self, "Zajęty", "Inna operacja jest już w toku. Poczekaj na jej zakończenie.")
+            return
+
+        item = self.file_tree.currentItem()
+        if not item: return
+        filename = item.text(0)
+
+        reply = QMessageBox.question(self, "Potwierdzenie usunięcia",
+                                     f"Czy na pewno chcesz trwale usunąć plik:\n\n{filename}\n\nTej operacji nie można cofnąć.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                     QMessageBox.StandardButton.Cancel)
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+        
+        sezon = self.browser_sezon_box.currentText()
+        seria_name = self.browser_seria_box.currentText()
+        seria_obj = next((s for s in self.dane.get(sezon, []) if s["Seria"] == seria_name), None)
+        if not seria_obj:
+            QMessageBox.critical(self, "Błąd", "Nie można znaleźć danych logowania dla tej serii.")
+            return
+
+        self.is_busy_with_context_action = True
+        self.browser_status_label.setText(f"Usuwanie pliku: {filename}...")
+        mail, haslo = seria_obj["Mail"], seria_obj["Haslo"]
+        
+        self.run_command('mega-logout', [], lambda ec, es: self._run_delete_login(ec, es, mail, haslo, filename))
+
+    def _run_delete_login(self, exit_code, exit_status, mail, haslo, filename):
+        """Wywoływane po wylogowaniu, aby zalogować się w celu usunięcia pliku."""
+        self.run_command('mega-login', [mail, haslo], lambda ec, es: self._on_delete_login_finished(ec, es, filename))
+
+    def _on_delete_login_finished(self, exit_code, exit_status, filename):
+        """Wywoływane po zalogowaniu w celu usunięcia pliku."""
+        if exit_code != 0:
+            self.browser_status_label.setText("Błąd: Logowanie nie powiodło się.")
+            self.is_busy_with_context_action = False
+            self.run_command('mega-logout', [], lambda: None)
+            return
+
+        self.browser_status_label.setText(f"Wysyłanie polecenia usunięcia dla {filename}...")
+        self.run_command('mega-rm', [f"/{filename}"], self._on_delete_finished)
+
+    def _on_delete_finished(self, exit_code, exit_status):
+        """Wywoływane po zakończeniu operacji 'mega-rm'."""
+        if exit_code == 0:
+            QMessageBox.information(self, "Sukces", "Plik został pomyślnie usunięty.")
+            self._refresh_file_list()
+        else:
+            QMessageBox.critical(self, "Błąd", "Nie udało się usunąć pliku.")
+            self.browser_status_label.setText("Błąd podczas usuwania pliku.")
+
+        self.is_busy_with_context_action = False
+
+    def _update_browser_series_list(self):
+        self.browser_seria_box.clear()
+        sezon = self.browser_sezon_box.currentText()
+        if sezon in self.dane:
+            series_names = [item["Seria"] for item in self.dane[sezon]]
+            self.browser_seria_box.addItems(series_names)
+
+    def _refresh_file_list(self):
+        sezon = self.browser_sezon_box.currentText()
+        seria_name = self.browser_seria_box.currentText()
+        if not sezon or not seria_name:
+            self.browser_status_label.setText("Błąd: Nie wybrano sezonu lub serii.")
+            return
+        seria_obj = next((s for s in self.dane.get(sezon, []) if s["Seria"] == seria_name), None)
+        if not seria_obj:
+            self.browser_status_label.setText("Błąd: Nie znaleziono danych dla wybranej serii.")
+            return
+        mail = seria_obj["Mail"]
+        haslo = seria_obj["Haslo"]
+        self.browser_status_label.setText(f"Logowanie na konto: {mail}...")
+        self.file_tree.clear()
+        self.ls_output = ""
+        self.run_command('mega-login', [mail, haslo], self._on_ls_login_finished)
+
+    def _on_ls_login_finished(self, exit_code, exit_status):
+        if exit_code != 0:
+            self.browser_status_label.setText("Błąd: Logowanie nie powiodło się.")
+            self.run_command('mega-logout', [], lambda: None)
+            return
+        self.browser_status_label.setText("Pobieranie listy plików...")
+        try:
+            self.process.readyReadStandardOutput.disconnect()
+            self.process.readyReadStandardError.disconnect()
+        except TypeError:
+            pass
+        self.process.readyReadStandardOutput.connect(self._handle_ls_output)
+        self.process.readyReadStandardError.connect(self._handle_ls_output)
+        self.run_command('mega-ls', ['-l', '/'], self._parse_ls_and_logout)
+
+    def _handle_ls_output(self):
+        if not self.process:
+            return
+        output = self.process.readAllStandardOutput().data().decode('utf-8', errors='ignore')
+        error_output = self.process.readAllStandardError().data().decode('utf-8', errors='ignore')
+        self.ls_output += output + error_output
+
+    def _parse_ls_and_logout(self, exit_code, exit_status):
+        try:
+            self.process.readyReadStandardOutput.disconnect()
+            self.process.readyReadStandardError.disconnect()
+        except TypeError:
+            pass
+        self.process.readyReadStandardOutput.connect(self.handle_process_output)
+        self.process.readyReadStandardError.connect(self.handle_process_output)
+        if exit_code != 0:
+            self.browser_status_label.setText("Błąd: Nie udało się pobrać listy plików.")
+        else:
+            self.file_tree.clear()
+            lines = self.ls_output.strip().split('\n')
+            item_count = 0
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('FLAGS VERS'):
+                    continue
+                match = re.match(r'(\S+)\s+\d+\s+(\d+)\s+(\d{2}[A-Za-z]{3}\d{4})\s+(\d{2}:\d{2}:\d{2})\s+(.*)', line)
+                if match:
+                    flags, size_bytes_str, date_str, time_str, name = match.groups()
+                    is_dir = 'd' in flags
+                    size_bytes = int(size_bytes_str)
+                    formatted_size = self._format_bytes(size_bytes)
+                    formatted_date = f"{date_str} {time_str}"
+                    item = QTreeWidgetItem(self.file_tree, [name, formatted_size, formatted_date])
+                    item.setData(0, Qt.ItemDataRole.UserRole, is_dir)
+                    if is_dir:
+                        item.setIcon(0, QIcon.fromTheme("folder"))
+                    else:
+                        item.setIcon(0, QIcon.fromTheme("text-plain"))
+                    item_count += 1
+            self.browser_status_label.setText(f"Gotowe. Znaleziono {item_count} elementów.")
+        self.run_command('mega-logout', [], lambda: self.browser_status_label.setText(self.browser_status_label.text() + " (Wylogowano)"))
 
     def _create_menu(self):
         menu_bar = QMenuBar(self)
-        
-        # Menu Plik
         file_menu = menu_bar.addMenu("&Plik")
+
+        manage_accounts_action = file_menu.addAction("Zarządzaj kontami...")
+        manage_accounts_action.triggered.connect(self._open_account_manager)
+        
         open_action = file_menu.addAction("Otwórz plik z danymi...")
         open_action.triggered.connect(lambda: self._load_data(manual_selection=True))
+
         file_menu.addSeparator()
         close_action = file_menu.addAction("Zamknij")
         close_action.triggered.connect(self.close)
-
-        # Menu Pomoc
+        
         help_menu = menu_bar.addMenu("&Pomoc")
         structure_action = help_menu.addAction("Struktura pliku `dane.json`")
         structure_action.triggered.connect(self._show_structure_help)
         help_menu.addSeparator()
         about_action = help_menu.addAction("O programie")
         about_action.triggered.connect(self._show_about_dialog)
-
         return menu_bar
+
+    def _open_account_manager(self):
+        """Otwiera dialog do zarządzania kontami."""
+        filepath = os.path.join(self.base_path, 'dane.json')
+        if not os.path.exists(filepath):
+            self.dane = {}
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump({}, f)
+
+        # Dialog teraz sam zarządza zapisem i pracuje na własnej kopii danych.
+        dialog = AccountManagerDialog(self.dane, filepath, self)
+        dialog.exec()
+
+        # Po zamknięciu dialogu, zawsze odśwież dane z pliku,
+        # ponieważ mogły zostać zmienione.
+        self._load_data()
+
 
     def _load_data(self, manual_selection=False):
         filepath = ''
@@ -148,9 +341,8 @@ class MegaUploader(QWidget):
             if not filepath:
                 return
         else:
-            # Domyślnie szukaj obok pliku .exe lub .py
             filepath = os.path.join(self.base_path, 'dane.json')
-
+        
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 self.dane = json.load(f)
@@ -159,10 +351,13 @@ class MegaUploader(QWidget):
             self.dane = {}
             error_msg = "Nie znaleziono pliku `dane.json`." if isinstance(e, FileNotFoundError) else "Plik z danymi jest uszkodzony."
             self.log_output.setText(f"BŁĄD: {error_msg}\n\nUżyj menu 'Plik -> Otwórz plik z danymi...', aby wczytać poprawny plik.")
-        
         self.sezon_box.clear()
-        self.sezon_box.addItems(self.dane.keys())
+        self.browser_sezon_box.clear()
+        if self.dane:
+            self.sezon_box.addItems(self.dane.keys())
+            self.browser_sezon_box.addItems(self.dane.keys())
         self.update_series_list()
+        self._update_browser_series_list()
         self._update_ui_state()
 
     def _update_ui_state(self):
@@ -223,32 +418,26 @@ class MegaUploader(QWidget):
         if file:
             self.file_path = file
             self.file_path_label.setText(os.path.basename(file))
-            self.file_path_label.setStyleSheet("") # Reset stylu
+            self.file_path_label.setStyleSheet("")
 
     def start_upload(self):
         if self.is_uploading:
             QMessageBox.warning(self, "Informacja", "Wysyłanie jest już w toku.")
             return
-
         if not self.file_path:
             QMessageBox.warning(self, "Błąd", "Nie wybrano pliku.")
             return
-
         if not self.series_list.currentItem():
             QMessageBox.warning(self, "Błąd", "Nie wybrano serii.")
             return
-
-        # Zapisz wybraną serię
         self.current_seria_name = self.series_list.currentItem().text()
-
         self.is_uploading = True
         self.upload_btn.setEnabled(False)
         self.choose_file_btn.setEnabled(False)
         self.log_output.clear()
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
-        
-        self.run_logout() # Rozpoczynamy sekwencję
+        self.run_logout()
 
     def run_command(self, command, args, on_finished_slot):
         if self.process is None:
@@ -256,11 +445,10 @@ class MegaUploader(QWidget):
             self.process.readyReadStandardOutput.connect(self.handle_process_output)
             self.process.readyReadStandardError.connect(self.handle_process_output)
             self.process.errorOccurred.connect(self.handle_error)
-
-        # Odłącz stary slot, jeśli istnieje
-        try: self.process.finished.disconnect()
-        except TypeError: pass
-
+        try:
+            self.process.finished.disconnect()
+        except TypeError:
+            pass
         self.process.finished.connect(on_finished_slot)
         self.process.start(command, args)
 
@@ -268,18 +456,14 @@ class MegaUploader(QWidget):
         self.status_label.setText("Wylogowywanie (na wszelki wypadek)...")
         self.run_command('mega-logout', [], self.run_login)
 
-    def run_login(self, exit_code=0, exit_status=None): # Dodano domyślne argumenty
+    def run_login(self, exit_code=0, exit_status=None):
         sezon = self.sezon_box.currentText()
-        # Użyj zapisanej nazwy serii
         seria_obj = next((s for s in self.dane[sezon] if s["Seria"] == self.current_seria_name), None)
-        
         if not seria_obj:
             self.on_upload_finished(error="Nie znaleziono danych serii.")
             return
-
         mail = seria_obj["Mail"]
         haslo = seria_obj["Haslo"]
-
         self.status_label.setText(f"Logowanie na konto: {mail}...")
         self.run_command('mega-login', [mail, haslo], self.run_put)
 
@@ -287,25 +471,23 @@ class MegaUploader(QWidget):
         if exit_code != 0:
             self.on_upload_finished(error="Logowanie nie powiodło się. Sprawdź dane i status serwera.")
             return
-
         self.status_label.setText(f"Wysyłanie pliku: {os.path.basename(self.file_path)}...")
-        # Specjalne podłączenie do odczytu postępu
-        try: self.process.readyReadStandardOutput.disconnect()
-        except TypeError: pass
+        try:
+            self.process.readyReadStandardOutput.disconnect()
+        except TypeError:
+            pass
         self.process.readyReadStandardOutput.connect(self.update_progress)
-
         self.run_command('mega-put', [self.file_path], self.run_export)
 
     def run_export(self, exit_code, exit_status):
-        # Przywrócenie normalnego odczytu logów
-        try: self.process.readyReadStandardOutput.disconnect()
-        except TypeError: pass
+        try:
+            self.process.readyReadStandardOutput.disconnect()
+        except TypeError:
+            pass
         self.process.readyReadStandardOutput.connect(self.handle_process_output)
-
         if exit_code != 0:
             self.on_upload_finished(error="Wysyłanie pliku nie powiodło się.")
             return
-
         self.status_label.setText("Generowanie linku publicznego...")
         filename = os.path.basename(self.file_path)
         self.run_command('mega-export', ['-a', filename], self.run_final_logout)
@@ -314,7 +496,6 @@ class MegaUploader(QWidget):
         if exit_code != 0:
             self.on_upload_finished(error="Nie udało się wygenerować linku.")
             return
-        
         self.status_label.setText("Wylogowywanie...")
         self.run_command('mega-logout', [], self.on_upload_finished)
 
@@ -325,7 +506,6 @@ class MegaUploader(QWidget):
         else:
             self.status_label.setText("Zakończono pomyślnie!")
             self.log_output.append("\n--- SUKCES ---")
-            # Wyszukiwanie linku w logach
             log_content = self.log_output.toPlainText()
             match = re.search(r'(https://mega.nz/file/\S+)', log_content)
             if match:
@@ -334,7 +514,6 @@ class MegaUploader(QWidget):
                 self.log_output.append(f"Link do osadzenia (embed): {link}")
             else:
                 self.log_output.append("\nNie udało się odnaleźć linku w logach.")
-
         self.is_uploading = False
         self.upload_btn.setEnabled(True)
         self.choose_file_btn.setEnabled(True)
@@ -353,8 +532,6 @@ class MegaUploader(QWidget):
         output = self.process.readAllStandardOutput().data().decode('utf-8', errors='ignore')
         self.log_output.append(output.strip())
         self.log_output.moveCursor(QTextCursor.MoveOperation.End)
-
-        # Proste parsowanie postępu z mega-put
         match = re.search(r'(\d+)/\d+ %\s*\((\d+)', output)
         if match:
             progress_percent = int(match.group(2))
@@ -371,10 +548,21 @@ class MegaUploader(QWidget):
         }
         self.on_upload_finished(error=error_map.get(error, "Nieznany błąd procesu."))
 
+    def _format_bytes(self, size_bytes):
+        if size_bytes is None:
+            return "N/A"
+        if size_bytes == 0:
+            return "0 B"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} PB"
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    apply_theme(app)  # <<< WYWOŁANIE TWOJEJ FUNKCJI
+    apply_theme(app)
     window = MegaUploader()
     window.show()
     sys.exit(app.exec())
