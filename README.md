@@ -8,4 +8,5 @@ Dodatki się umieszcza w folderze DLC w folderze automatyzera
 | DLCTEST |1.0 | Pokazuje czy obsługa dodatków działa|
 | Sprawdzacz czcionek |1.0  | Sprawdza pliki napisów pod katem wymaganych czcionek (działa tylko pod linux) |
 | Earnvids_integration |1.0 | Earnvids api panel|
-| Mega_upload_panel |1.0 | MEGA uploader panel wymaga doinstalowanego MEGA CMD do działania|
+| Mega_upload_panel |2.0 | MEGA uploader panel wymaga doinstalowanego MEGA CMD do działania|
+| Pixeldrain_integration |1.0 | Pixeldrain api panel|
