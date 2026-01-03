@@ -9,4 +9,4 @@ Dodatki się umieszcza w folderze DLC w folderze automatyzera
 | Sprawdzacz czcionek |1.0  | Sprawdza pliki napisów pod katem wymaganych czcionek (działa tylko pod linux) |
 | Earnvids_integration |1.0 | Earnvids api panel|
 | Mega_upload_panel |2.0 | MEGA uploader panel wymaga doinstalowanego MEGA CMD do działania|
-| Pixeldrain_integration |1.0 | Pixeldrain api panel|
+| Pixeldrain_integration |2.0 | Pixeldrain api panel|
