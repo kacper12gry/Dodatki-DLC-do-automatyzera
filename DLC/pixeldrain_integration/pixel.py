@@ -1,8 +1,9 @@
-import sys, os, requests, webbrowser, json, time, argparse, base64
+import sys, os, requests, webbrowser, json, time, argparse, base64, datetime
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTextEdit, QMessageBox, QFileDialog,
-    QListWidget, QListWidgetItem, QProgressBar, QStyleFactory, QSplitter
+    QListWidget, QListWidgetItem, QProgressBar, QStyleFactory, QSplitter,
+    QFrame
 )
 from PyQt6.QtCore import Qt, QRunnable, QThreadPool, pyqtSignal, QObject
 
@@ -12,6 +13,13 @@ FILES_URL = "https://pixeldrain.com/api/user/files"
 UPLOAD_URL = "https://pixeldrain.com/api/file/{}"
 VIEW_URL = "https://pixeldrain.com/u/{}"
 EMBED_URL = "https://pixeldrain.com/u/{}"
+
+def format_size(size):
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} PB"
 
 def apply_theme(app):
     parser = argparse.ArgumentParser()
@@ -56,7 +64,6 @@ class UploadWorker(QRunnable):
                         self.signals.progress.emit(prog)
                         yield data
                 
-                # POTENCJALNA POPRAWKA: Dodanie nagłówka Content-Type
                 headers = {'Content-Type': 'application/octet-stream'}
                 resp = requests.put(url, data=gen(), auth=('', self.api_key), headers=headers)
 
@@ -108,9 +115,10 @@ class FileUploadWidget(QWidget):
 class PixeldrainApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Pixeldrain Uploader")
-        self.setGeometry(150, 150, 950, 700)
+        self.setWindowTitle("Pixeldrain Uploader V2")
+        self.setGeometry(150, 150, 1100, 750)
         self.selected_files = []
+        self.remote_files = [] # Cache for fetched files
         self.threadpool = QThreadPool()
         self.setup_ui()
         self.load_api_key()
@@ -130,29 +138,38 @@ class PixeldrainApp(QWidget):
         self.info_btn = QPushButton("Pobierz info o koncie")
         self.info_btn.clicked.connect(self.get_account_info)
 
-        self.choose_btn = QPushButton("Wybierz pliki…")
+        self.choose_btn = QPushButton("Wybierz pliki do wysłania…")
         self.choose_btn.clicked.connect(self.choose_files)
         self.upload_btn = QPushButton("Wyślij pliki")
         self.upload_btn.clicked.connect(self.upload_files)
         
-        self.show_files_btn = QPushButton("Pokaż pliki na koncie")
+        # --- Sekcja plików zdalnych i wyszukiwania ---
+        self.show_files_btn = QPushButton("Odśwież listę plików")
         self.show_files_btn.clicked.connect(self.show_remote_files)
+        
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Szukaj plików...")
+        self.search_input.textChanged.connect(self.filter_file_list)
 
         left_panel = QVBoxLayout()
-        left_panel.addWidget(QLabel("API Key:"))
+        left_panel.addWidget(QLabel("<b>Konfiguracja:</b>"))
         left_panel.addLayout(hl_key)
         left_panel.addWidget(self.info_btn)
-        left_panel.addSpacing(20)
-        left_panel.addWidget(QLabel("Upload:"))
+        left_panel.addSpacing(15)
+        
+        left_panel.addWidget(QLabel("<b>Wysyłanie:</b>"))
         hl_upload = QHBoxLayout()
         hl_upload.addWidget(self.choose_btn)
         hl_upload.addWidget(self.upload_btn)
         left_panel.addLayout(hl_upload)
-        left_panel.addSpacing(20)
-        left_panel.addWidget(QLabel("Pliki na koncie:"))
+        left_panel.addSpacing(15)
+        
+        left_panel.addWidget(QLabel("<b>Zarządzanie plikami:</b>"))
+        left_panel.addWidget(self.search_input)
         left_panel.addWidget(self.show_files_btn)
         left_panel.addStretch()
 
+        # --- Logi ---
         log_widget = QWidget()
         log_layout = QVBoxLayout(log_widget)
         log_layout.setContentsMargins(0,0,0,0)
@@ -161,24 +178,31 @@ class PixeldrainApp(QWidget):
         self.output.setReadOnly(True)
         log_layout.addWidget(self.output)
 
+        # --- Lista plików ---
         upload_widget = QWidget()
         upload_layout = QVBoxLayout(upload_widget)
         upload_layout.setContentsMargins(0,0,0,0)
-        upload_layout.addWidget(QLabel("Pliki"))
+        upload_layout.addWidget(QLabel("Lista plików:"))
         self.file_list = QListWidget()
         upload_layout.addWidget(self.file_list)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(log_widget)
         splitter.addWidget(upload_widget)
-        splitter.setSizes([200, 500])
+        splitter.setSizes([150, 550])
 
         right_panel = QVBoxLayout()
         right_panel.addWidget(splitter)
 
         main_layout = QHBoxLayout(self)
-        main_layout.addLayout(left_panel, 2)
-        main_layout.addLayout(right_panel, 5)
+        
+        # Kontener dla lewego panelu (stała szerokość)
+        left_sidebar = QWidget()
+        left_sidebar.setFixedWidth(300)
+        left_sidebar.setLayout(left_panel)
+        
+        main_layout.addWidget(left_sidebar)
+        main_layout.addLayout(right_panel, 1) # Prawa strona zajmuje resztę miejsca
 
     def load_api_key(self):
         if os.path.exists(CONFIG_FILE):
@@ -221,18 +245,19 @@ class PixeldrainApp(QWidget):
         try:
             r = requests.get(FILES_URL, auth=('', key))
             data = r.json()
-            self.file_list.clear()
-
+            
             if r.status_code == 200 and "files" in data:
-                files = data.get("files", [])
-                if not files:
+                self.remote_files = data.get("files", [])
+                if not self.remote_files:
+                    self.file_list.clear()
                     self.output.append("📂 Twoje konto Pixeldrain jest puste.")
                     self.file_list.addItem("Brak plików na koncie")
                     return
-                for f in files:
-                    self.add_remote_file_to_list(f)
-                self.output.append(f"📄 Załadowano {len(files)} plików z konta.")
+                
+                self.output.append(f"📄 Pobrano listę {len(self.remote_files)} plików.")
+                self.filter_file_list() # Wywołuje wyświetlenie z uwzględnieniem filtra
             else:
+                self.file_list.clear()
                 self.output.append(f"Błąd API (Status: {r.status_code}):\n{json.dumps(data, indent=2)}")
                 self.file_list.addItem("Nie udało się załadować plików.")
         except Exception as e:
@@ -240,26 +265,89 @@ class PixeldrainApp(QWidget):
             self.output.append(f"Błąd połączenia: {e}")
             self.file_list.addItem("Błąd połączenia.")
 
+    def filter_file_list(self):
+        """Filtruje i wyświetla pliki z cache (self.remote_files) na podstawie search_input."""
+        query = self.search_input.text().lower()
+        self.file_list.clear()
+
+        if not self.remote_files:
+            return
+
+        filtered_files = [f for f in self.remote_files if query in f.get("name", "").lower()]
+        
+        for f in filtered_files:
+            self.add_remote_file_to_list(f)
+            
+        if not filtered_files and query:
+            self.file_list.addItem("Brak wyników wyszukiwania.")
+
     def add_remote_file_to_list(self, f):
-        file_id, name = f.get("id"), f.get("name", "(brak nazwy)")
+        file_id = f.get("id")
+        name = f.get("name", "(brak nazwy)")
+        size = f.get("size", 0)
+        views = f.get("views", 0)
+        downloads = f.get("downloads", 0)
+        date_upload = f.get("date_upload", "")
+        
+        # Formatowanie daty
+        date_str = date_upload
+        try:
+            # Próba parsowania daty (zależy od formatu API Pixeldrain, zazwyczaj ISO)
+            dt = datetime.datetime.fromisoformat(date_upload.replace("Z", "+00:00"))
+            date_str = dt.strftime("%Y-%m-%d %H:%M")
+        except:
+            pass
+
         view_url, embed_url = VIEW_URL.format(file_id), EMBED_URL.format(file_id)
         
         item_widget = QWidget()
         item_layout = QVBoxLayout(item_widget)
         item_layout.setContentsMargins(5, 5, 5, 5)
+        item_layout.setSpacing(2)
         
-        label = QLabel(f"📄 {name}")
-        item_layout.addWidget(label)
+        # Górny wiersz: Nazwa i Data
+        top_row = QHBoxLayout()
+        name_label = QLabel(f"<b>{name}</b>")
+        name_label.setStyleSheet("font-size: 14px;")
+        date_label = QLabel(f"<span style='color: gray; font-size: 10px;'>{date_str}</span>")
+        top_row.addWidget(name_label)
+        top_row.addStretch()
+        top_row.addWidget(date_label)
+        item_layout.addLayout(top_row)
 
+        # Środkowy wiersz: Statystyki
+        stats_row = QHBoxLayout()
+        stats_style = "color: #DDD; font-size: 11px;" # Jasny tekst dla ciemnego motywu, ale uniwersalny
+        
+        size_lbl = QLabel(f"💾 {format_size(size)}")
+        views_lbl = QLabel(f"👁️ {views}")
+        downloads_lbl = QLabel(f"⬇️ {downloads}")
+        
+        # Dodajemy trochę odstępu między statystykami
+        stats_row.addWidget(size_lbl)
+        stats_row.addSpacing(15)
+        stats_row.addWidget(views_lbl)
+        stats_row.addSpacing(15)
+        stats_row.addWidget(downloads_lbl)
+        stats_row.addStretch()
+        item_layout.addLayout(stats_row)
+
+        # Dolny wiersz: Przyciski
         buttons_layout = QHBoxLayout()
         view_btn = QPushButton("🔗 Otwórz")
+        view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         view_btn.clicked.connect(lambda: webbrowser.open(view_url))
-        embed_btn = QPushButton("📎 Kopiuj embed")
+        
+        embed_btn = QPushButton("📋 Kopiuj Link")
+        embed_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         embed_btn.clicked.connect(lambda: QApplication.clipboard().setText(embed_url))
+        
         buttons_layout.addWidget(view_btn)
         buttons_layout.addWidget(embed_btn)
-        
+        buttons_layout.addStretch()
         item_layout.addLayout(buttons_layout)
+        
+        # Linia oddzielająca (opcjonalnie, ale QListWidget ma swoje)
         
         list_item = QListWidgetItem()
         list_item.setSizeHint(item_widget.sizeHint())
@@ -271,11 +359,8 @@ class PixeldrainApp(QWidget):
         if paths:
             self.selected_files = paths
             self.output.append(f"Wybrano {len(paths)} plików do wysłania.")
-            # ZMIANA: Nie pokazujemy już plików na liście po wybraniu
-            # Zamiast tego, można wyczyścić listę, aby było jasne, że czeka na upload
             self.file_list.clear()
             self.file_list.addItem(f"Gotowe do wysłania: {len(paths)} plików. Naciśnij 'Wyślij pliki'.")
-
 
     def upload_files(self):
         key = self.api_key_input.text().strip()
